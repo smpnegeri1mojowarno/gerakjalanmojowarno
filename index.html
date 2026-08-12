@@ -530,10 +530,28 @@
                 const res = await fetch(API_URL, { method: 'GET', cache: 'no-store' });
                 const json = await res.json();
                 if (json.status === 'ok') {
-                    participants = (json.data || []).map(normalizeParticipant);
+                    const rawList = json.data || [];
+                    const normalized = rawList.map(normalizeParticipant);
+                    participants = normalized;
                     syncUI();
                     setDbStatusIcon('connected');
                     if (showMsg) showToast('Terhubung ke Database Cloud (Google Sheets)!', 'success');
+
+                    // Auto-perbaikan: jika ada format waktu yang rusak (dikonversi Google Sheets
+                    // menjadi tanggal), kirim balik versi yang sudah dibetulkan ke database
+                    // secara diam-diam supaya data di Sheet ikut bersih untuk seterusnya.
+                    const needsRepair = normalized.filter((p, i) => {
+                        const raw = rawList[i] || {};
+                        return String(raw.waktuStart || '') !== p.waktuStart ||
+                               String(raw.waktuFinish || '') !== p.waktuFinish ||
+                               Number(raw.menit || 0) !== p.menit ||
+                               Number(raw.detik || 0) !== p.detik ||
+                               Number(raw.skorWaktu || 0) !== p.skorWaktu ||
+                               Number(raw.totalSkor || 0) !== p.totalSkor;
+                    });
+                    if (needsRepair.length > 0) {
+                        pushToCloud({ action: 'bulkSave', data: needsRepair });
+                    }
                 } else {
                     setDbStatusIcon('error');
                     if (showMsg) showToast('Gagal memuat data cloud: ' + (json.message || ''), 'error');
@@ -547,19 +565,36 @@
             }
         }
 
+        function normalizeTimeValue(v) {
+            if (!v) return '';
+            const s = String(v);
+            // Google Sheets kadang mengubah "HH:MM:SS" menjadi tanggal/jam internal
+            // yang muncul sebagai ISO string seperti "1899-12-30T06:46:37.000Z".
+            // Ambil kembali bagian jam:menit:detik-nya saja.
+            const m = s.match(/T(\d{2}:\d{2}:\d{2})/);
+            if (m) return m[1];
+            return s;
+        }
+
         function normalizeParticipant(p) {
+            const waktuStart = normalizeTimeValue(p.waktuStart);
+            const waktuFinish = normalizeTimeValue(p.waktuFinish);
+            const dur = calculateDurationFromTimes(waktuStart, waktuFinish);
+            const kekompakan = Number(p.kekompakan) || 0;
+            const keserasian = Number(p.keserasian) || 0;
+            const semangat = Number(p.semangat) || 0;
+            const kelengkapan = Number(p.kelengkapan) || 0;
+            const scores = calculateScores(p.kategori, dur.menit, dur.detik, kekompakan, keserasian, semangat, kelengkapan);
             return {
                 ...p,
                 no: String(p.no || ''),
-                menit: Number(p.menit) || 0,
-                detik: Number(p.detik) || 0,
-                skorWaktu: Number(p.skorWaktu) || 0,
-                totalSkor: Number(p.totalSkor) || 0,
-                kekompakan: Number(p.kekompakan) || 0,
-                keserasian: Number(p.keserasian) || 0,
-                semangat: Number(p.semangat) || 0,
-                kelengkapan: Number(p.kelengkapan) || 0,
-                isScored: (p.isScored === true || p.isScored === 'true' || p.isScored === 1)
+                waktuStart, waktuFinish,
+                menit: dur.menit,
+                detik: dur.detik,
+                skorWaktu: scores.skorWaktu,
+                totalSkor: scores.totalSkor,
+                kekompakan, keserasian, semangat, kelengkapan,
+                isScored: (waktuStart !== '' || waktuFinish !== '' || kekompakan > 0)
             };
         }
 
